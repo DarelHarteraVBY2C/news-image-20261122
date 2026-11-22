@@ -1,86 +1,101 @@
-// news-image-20261122: one-page newspaper front page for Sunday 22 November 2026.
-// The picture is entry.jpg next to this file. This program checks that it is
-// a complete 1024x1024 JPEG under 1 MiB, copies it to the output directory
-// as entry.png, then re-reads the copy and checks it byte for byte, so two
-// runs always produce identical bytes.
+// Entry for the 22 November 2026 news-image competition.
+// Sunday's front page is entry.jpg in this folder. This script makes
+// sure the picture is a genuine 1024 by 1024 JPEG smaller than one
+// mebibyte, writes it out as entry.png in the output folder, and then
+// reads the copy back to prove it matches the original exactly. Two
+// runs must leave identical bytes behind.
 //
-// Run it yourself: mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
+// Try it: mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
 
-import * as fs from 'node:fs';
-import * as crypto from 'node:crypto';
-import * as path from 'node:path';
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-// The folder this file lives in.
-const DIR = path.dirname(fileURLToPath(import.meta.url));
-const SRC = 'entry.jpg';
-const LIMIT = 1048576; // 1 MiB
-const SIDE = 1024;
+const ROOT = dirname(fileURLToPath(import.meta.url));
+const IMAGE = 'entry.jpg';
+const MAX = 1048576;
+const DIM = 1024;
 
-type Size = { width: number; height: number };
+class JpegCheck {
+  private bytes: Buffer;
 
-// Dimensions from the first SOF0/SOF2 segment; undefined when the buffer
-// is not a JPEG or holds no size segment before the end-of-image marker.
-function jpegSize(buf: Buffer): Size | undefined {
-  if (buf.length < 4 || buf[0] !== 0xff || buf[1] !== 0xd8) return undefined;
-  let pos = 2;
-  let found: Size | undefined;
-  while (pos + 4 <= buf.length && found === undefined) {
-    if (buf[pos] !== 0xff) break;
-    const code = buf[pos + 1];
-    if (code === 0xd9) break; // EOI: end of image, no size found
-    if (code === 0x01 || (code >= 0xd0 && code <= 0xd7)) {
-      pos += 2;
-      continue;
-    }
-    const len = buf.readUInt16BE(pos + 2);
-    if (len < 2 || pos + 2 + len > buf.length) break;
-    if (code === 0xc0 || code === 0xc2) {
-      found = { height: buf.readUInt16BE(pos + 5), width: buf.readUInt16BE(pos + 7) };
-    } else {
-      pos += 2 + len;
-    }
+  constructor(bytes: Buffer) {
+    this.bytes = bytes;
   }
-  return found;
+
+  get size(): number {
+    return this.bytes.length;
+  }
+
+  get isJpeg(): boolean {
+    return this.bytes.length >= 2 && this.bytes[0] === 0xff && this.bytes[1] === 0xd8;
+  }
+
+  // Walk the marker segments from the start of the file until the first
+  // frame header (SOF0 or SOF2) gives up the width and height.
+  dimensions(): { width: number; height: number } | null {
+    if (!this.isJpeg) return null;
+    let at = 2;
+    const data = this.bytes;
+    while (at + 4 <= data.length) {
+      if (data[at] !== 0xff) return null;
+      const tag = data[at + 1];
+      if (tag === 0xd9) return null;
+      if (tag === 0x01 || (tag >= 0xd0 && tag <= 0xd7)) {
+        at += 2;
+        continue;
+      }
+      const seg = data.readUInt16BE(at + 2);
+      if (seg < 2 || at + 2 + seg > data.length) return null;
+      if (tag === 0xc0 || tag === 0xc2) {
+        return {
+          width: data.readUInt16BE(at + 7),
+          height: data.readUInt16BE(at + 5),
+        };
+      }
+      at += 2 + seg;
+    }
+    return null;
+  }
+
+  fingerprint(): string {
+    return createHash('sha256').update(this.bytes).digest('hex');
+  }
 }
 
-function sha256(buf: Buffer): string {
-  return crypto.createHash('sha256').update(buf).digest('hex');
-}
-
-function fail(msg: string, code: number): never {
-  process.stderr.write(`news-image-20261122: ${msg}\n`);
+function abort(text: string, code: number): never {
+  process.stderr.write(`news-image-20261122: ${text}\n`);
   process.exit(code);
 }
 
-const srcPath = path.join(DIR, SRC);
-if (!fs.existsSync(srcPath)) {
-  fail(`no ${SRC} next to main.ts; run compose.py first`, 2);
+const origin = join(ROOT, IMAGE);
+if (!existsSync(origin)) {
+  abort(`cannot find ${IMAGE} next to main.ts; run compose.py to make it`, 2);
 }
-const data = fs.readFileSync(srcPath);
-if (data.length > LIMIT) {
-  fail(`${SRC} is ${data.length} bytes, over the ${LIMIT} byte limit`, 1);
+const first = new JpegCheck(readFileSync(origin));
+if (first.size > MAX) {
+  abort(`${IMAGE} weighs ${first.size} bytes, above the ${MAX} byte ceiling`, 1);
 }
-const size = jpegSize(data);
-if (size === undefined) {
-  fail(`${SRC} has no JPEG size marker`, 1);
+const dims = first.dimensions();
+if (dims === null) {
+  abort(`${IMAGE} has no readable JPEG frame header`, 1);
 }
-if (size.width !== SIDE || size.height !== SIDE) {
-  fail(`${SRC} is ${size.width}x${size.height}, must be ${SIDE}x${SIDE}`, 1);
+if (dims.width !== DIM || dims.height !== DIM) {
+  abort(`${IMAGE} is ${dims.width} by ${dims.height}, wanted ${DIM} by ${DIM}`, 1);
 }
-
-const outDir = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
-fs.mkdirSync(outDir, { recursive: true });
-const outPath = path.join(outDir, 'entry.png');
-fs.writeFileSync(outPath, data);
-const copy = fs.readFileSync(outPath);
-if (copy.length !== data.length || sha256(copy) !== sha256(data)) {
-  fail(`copy at ${outPath} differs from ${SRC}`, 1);
+const target = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
+mkdirSync(target, { recursive: true });
+const dest = join(target, 'entry.png');
+writeFileSync(dest, readFileSync(origin));
+const second = new JpegCheck(readFileSync(dest));
+if (second.size !== first.size || second.fingerprint() !== first.fingerprint()) {
+  abort(`the file at ${dest} is not a faithful copy of ${IMAGE}`, 1);
 }
-// Read the size markers back out of the copy itself: a truncated or
-// swapped target is caught here even if its byte count happens to match.
-const copySize = jpegSize(copy);
-if (copySize === undefined || copySize.width !== SIDE || copySize.height !== SIDE) {
-  fail(`copy at ${outPath} does not read as a ${SIDE}x${SIDE} JPEG`, 1);
+const again = second.dimensions();
+if (again === null || again.width !== DIM || again.height !== DIM) {
+  abort(`the file at ${dest} does not parse as a ${DIM} by ${DIM} JPEG`, 1);
 }
-process.stdout.write(`news-image-20261122: wrote ${outPath} (${copy.length} bytes, JPEG 1024x1024, sha256 ${sha256(copy).slice(0, 16)}...)\n`);
+process.stdout.write(
+  `news-image-20261122: wrote ${dest} (${second.size} bytes, JPEG 1024x1024, sha256 ${second.fingerprint().slice(0, 16)}...)\n`,
+);
